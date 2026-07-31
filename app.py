@@ -5,7 +5,7 @@ import os
 st.set_page_config(page_title="SAP QC Plant Dashboard", layout="wide")
 
 st.title("🏭 SAP Quality Control Pending Dashboard")
-st.write("Locks directly onto text headers dynamically and filters rows matching status **MOVE TO QC**.")
+st.write("Match your columns manually below to process records matching **MOVE TO QC**.")
 
 # --- DATABASE LOADER ---
 DB_FILE = "electrical_groups.txt"
@@ -28,149 +28,127 @@ uploaded_file = st.file_uploader("Upload SAP Spreadsheet (.xlsx or .xls)", type=
 
 if uploaded_file is not None:
     try:
-        # Load raw data without assuming where the header is
-        raw_df = pd.read_excel(uploaded_file, header=None)
+        # Load data cleanly
+        df = pd.read_excel(uploaded_file)
+        all_cols = [str(c) for c in df.columns]
         
-        # --- DYNAMIC HEADER FINDER ENGINE ---
-        # Look for the row that actually contains your SAP headers
-        header_row_index = 0
-        found_header = False
+        # --- MANUAL VISUAL COLUMN OVERRIDES ---
+        st.subheader("⚙️ Column Configuration Panel")
+        st.info("Select the correct columns from your uploaded file if they weren't auto-selected:")
         
-        for idx, row in raw_df.iterrows():
-            row_str = row.astype(str).str.strip().str.lower().tolist()
-            # If this row contains keywords from your SAP report, it's our header row!
-            if any("material group" in s or "qualinsp" in s or "grn" in s for s in row_str):
-                header_row_index = idx
-                found_header = True
-                break
-                
-        # Re-read or adjust dataframe with the correct header row discovered
-        if found_header:
-            df = pd.read_excel(uploaded_file, skiprows=header_row_index)
-        else:
-            df = pd.read_excel(uploaded_file) # fallback if not found
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            plant_col = st.selectbox("Plant Column (C):", all_cols, index=next((i for i, c in enumerate(all_cols) if "plant" in c.lower()), min(2, len(all_cols)-1)))
+        with c2:
+            mat_id_col = st.selectbox("Material Column:", all_cols, index=next((i for i, c in enumerate(all_cols) if "material" in c.lower() and "group" not in c.lower()), min(1, len(all_cols)-1)))
+        with c3:
+            mat_col = st.selectbox("Material Group Column (D):", all_cols, index=next((i for i, c in enumerate(all_cols) if "group" in c.lower() or "grup" in c.lower()), min(3, len(all_cols)-1)))
+        with c4:
+            grn_col = st.selectbox("GRN No Column (I):", all_cols, index=next((i for i, c in enumerate(all_cols) if "grn" in c.lower()), min(8, len(all_cols)-1)))
+        with c5:
+            val_col = st.selectbox("QualInsp Value Column (T):", all_cols, index=next((i for i, c in enumerate(all_cols) if "insp" in c.lower() or "value" in c.lower()), min(19, len(all_cols)-1)))
 
-        # Clean header layout spaces and case variance to map keys smoothly
-        headers_dict = {str(c).strip().lower(): c for c in df.columns}
-        
-        # Smart Flexible Matching for names
-        plant_col = next((headers_dict[k] for k in headers_dict if "plant" in k), None)
-        
-        # Differentiate between 'Material' (ID) and 'Material Group'
-        mat_col = next((headers_dict[k] for k in headers_dict if "material group" in k or "material grup" in k), None)
-        mat_id_col = next((headers_dict[k] for k in headers_dict if "material" == k or ("material" in k and "group" not in k and "grup" not in k)), None)
-        if not mat_id_col:
-            mat_id_col = mat_col # Backup fallback if only one material column exists
-            
-        grn_col = next((headers_dict[k] for k in headers_dict if "grn no" in k or "grn" in k), None)
-        val_col = next((headers_dict[k] for k in headers_dict if "qualinsp" in k or "value in qual" in k or "insp" in k), None)
-        
+        # Find status column for MOVE TO QC
         status_col = None
         for col in df.columns:
             if df[col].astype(str).str.upper().str.contains("MOVE TO QC", na=False).any():
                 status_col = col
                 break
+        
+        if not status_col:
+            status_col = st.selectbox("Status / Action Column:", all_cols, index=0)
+            
+        st.write("---")
 
-        # Check if mandatory metrics blocks are located
-        if plant_col and mat_col and grn_col and val_col and status_col:
+        # --- DATA CLEANING LAYER ---
+        df[plant_col] = df[plant_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        df[grn_col] = df[grn_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        df[mat_id_col] = df[mat_id_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        df[mat_col] = df[mat_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        
+        # Clean currency punctuation spacing
+        df[val_col] = df[val_col].astype(str).str.replace(r'[\s,]', '', regex=True)
+        df[val_col] = pd.to_numeric(df[val_col], errors='coerce').fillna(0.0)
+        
+        # --- FILTER CORES ---
+        qc_mask = df[status_col].astype(str).str.upper().str.contains("MOVE TO QC", na=False)
+        pending_df = df[qc_mask & (df[val_col] > 0)].copy()
+        
+        # --- PLANT NAVIGATOR ---
+        st.subheader("🌐 Plant Selection Workspace")
+        available_plants = sorted(list(pending_df[plant_col].unique()))
+        
+        def format_plant_label(p_id):
+            if "1201" in str(p_id):
+                return "🏢 1201 - ECITY"
+            elif "1202" in str(p_id):
+                return "🏭 1202 - Vemgal"
+            return f"📍 Plant {p_id}"
             
-            # --- DATA CLEANING LAYER ---
-            df[plant_col] = df[plant_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-            df[grn_col] = df[grn_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-            df[mat_id_col] = df[mat_id_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-            df[mat_col] = df[mat_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        if available_plants:
+            selected_plant_id = st.selectbox(
+                "Select Plant to View Worklist Data:", 
+                options=available_plants,
+                format_func=format_plant_label
+            )
             
-            # Remove spaces and commas from numbers
-            df[val_col] = df[val_col].astype(str).str.replace(r'[\s,]', '', regex=True)
-            df[val_col] = pd.to_numeric(df[val_col], errors='coerce').fillna(0.0)
+            plant_filtered_df = pending_df[pending_df[plant_col] == selected_plant_id]
             
-            # --- FILTER CORES ---
-            qc_mask = df[status_col].astype(str).str.upper().str.contains("MOVE TO QC", na=False)
-            pending_df = df[qc_mask & (df[val_col] > 0)].copy()
+            # --- DEPARTMENT SPLIT ---
+            elec_df = plant_filtered_df[plant_filtered_df[mat_col].isin(ELECTRICAL_GROUPS)]
+            mech_df = plant_filtered_df[~plant_filtered_df[mat_col].isin(ELECTRICAL_GROUPS)]
             
-            # --- PLANT NAVIGATOR ---
+            total_elec_value = elec_df[val_col].sum()
+            total_elec_grns = elec_df[grn_col].nunique()
+            total_elec_lots = len(elec_df)
+            
+            total_mech_value = mech_df[val_col].sum()
+            total_mech_grns = mech_df[grn_col].nunique()
+            total_mech_lots = len(mech_df)
+            
+            # --- UI METRICS ---
             st.write("---")
-            st.subheader("🌐 Plant Selection Workspace")
+            st.markdown(f"### 📈 Worklist Metrics for **{format_plant_label(selected_plant_id)}**")
             
-            available_plants = sorted(list(pending_df[plant_col].unique()))
+            dash_col1, dash_col2 = st.columns(2)
+            with dash_col1:
+                st.markdown("#### ⚡ Electrical Department Summary")
+                st.metric(label="Pending Inspection Value", value=f"₹{total_elec_value:,.2f}")
+                sub_col1, sub_col2 = st.columns(2)
+                sub_col1.metric(label="Pending GRNs Count", value=f"{total_elec_grns}")
+                sub_col2.metric(label="Total Inspection Lots (Rows)", value=f"{total_elec_lots}")
+                
+            with dash_col2:
+                st.markdown("#### ⚙️ Mechanical / Other Summary")
+                st.metric(label="Pending Inspection Value", value=f"₹{total_mech_value:,.2f}")
+                sub_col3, sub_col4 = st.columns(2)
+                sub_col3.metric(label="Pending GRNs Count", value=f"{total_mech_grns}")
+                sub_col4.metric(label="Total Inspection Lots (Rows)", value=f"{total_mech_lots}")
+                
+            st.write("---")
+            tab1, tab2 = st.tabs(["⚡ Filtered Electrical Rows", "⚙️ Filtered Mechanical Rows"])
             
-            def format_plant_label(p_id):
-                if "1201" in str(p_id):
-                    return "🏢 1201 - ECITY"
-                elif "1202" in str(p_id):
-                    return "🏭 1202 - Vemgal"
-                return f"📍 Plant {p_id}"
-                
-            if available_plants:
-                selected_plant_id = st.selectbox(
-                    "Select Plant to View Worklist Data:", 
-                    options=available_plants,
-                    format_func=format_plant_label
-                )
-                
-                plant_filtered_df = pending_df[pending_df[plant_col] == selected_plant_id]
-                
-                # --- DEPARTMENT SPLIT DISPATCHER ---
-                elec_df = plant_filtered_df[plant_filtered_df[mat_col].isin(ELECTRICAL_GROUPS)]
-                mech_df = plant_filtered_df[~plant_filtered_df[mat_col].isin(ELECTRICAL_GROUPS)]
-                
-                total_elec_value = elec_df[val_col].sum()
-                total_elec_grns = elec_df[grn_col].nunique()
-                total_elec_lots = len(elec_df)
-                
-                total_mech_value = mech_df[val_col].sum()
-                total_mech_grns = mech_df[grn_col].nunique()
-                total_mech_lots = len(mech_df)
-                
-                # --- UI DISPLAY OUTLETS ---
-                st.write("---")
-                st.markdown(f"### 📈 Worklist Metrics for **{format_plant_label(selected_plant_id)}**")
-                
-                dash_col1, dash_col2 = st.columns(2)
-                
-                with dash_col1:
-                    st.markdown("#### ⚡ Electrical Department Summary")
-                    st.metric(label="Pending Inspection Value", value=f"₹{total_elec_value:,.2f}")
-                    sub_col1, sub_col2 = st.columns(2)
-                    sub_col1.metric(label="Pending GRNs Count", value=f"{total_elec_grns}")
-                    sub_col2.metric(label="Total Inspection Lots (Rows)", value=f"{total_elec_lots}")
+            with tab1:
+                st.subheader("Active Electrical Batches")
+                if not elec_df.empty:
+                    display_elec = elec_df[[grn_col, mat_id_col, mat_col, val_col]].copy()
+                    display_elec.columns = ['GRN NO', 'Material ID', 'Material Group', 'Value in QualInsp.']
+                    st.dataframe(display_elec.sort_values(by='Value in QualInsp.', ascending=False), use_container_width=True)
+                else:
+                    st.warning("No pending Electrical rows found matching your 100 codes list under 'MOVE TO QC'.")
                     
-                with dash_col2:
-                    st.markdown("#### ⚙️ Mechanical / Other Summary")
-                    st.metric(label="Pending Inspection Value", value=f"₹{total_mech_value:,.2f}")
-                    sub_col3, sub_col4 = st.columns(2)
-                    sub_col3.metric(label="Pending GRNs Count", value=f"{total_mech_grns}")
-                    sub_col4.metric(label="Total Inspection Lots (Rows)", value=f"{total_mech_lots}")
-                    
-                st.write("---")
-                
-                tab1, tab2 = st.tabs(["⚡ Filtered Electrical Rows", "⚙️ Filtered Mechanical Rows"])
-                
-                with tab1:
-                    st.subheader("Active Electrical Batches")
-                    if not elec_df.empty:
-                        display_elec = elec_df[[grn_col, mat_id_col, mat_col, val_col]].copy()
-                        display_elec.columns = ['GRN NO', 'Material ID', 'Material Group', 'Value in QualInsp.']
-                        st.dataframe(display_elec.sort_values(by='Value in QualInsp.', ascending=False), use_container_width=True)
-                    else:
-                        st.warning("No pending Electrical rows found matching your 100 codes list under 'MOVE TO QC'.")
-                        
-                with tab2:
-                    st.subheader("Active Mechanical / Remaining Batches")
-                    if not mech_df.empty:
-                        display_mech = mech_df[[grn_col, mat_id_col, mat_col, val_col]].copy()
-                        display_mech.columns = ['GRN NO', 'Material ID', 'Material Group', 'Value in QualInsp.']
-                        st.dataframe(display_mech.sort_values(by='Value in QualInsp.', ascending=False), use_container_width=True)
-                    else:
-                        st.info("No remaining mechanical records waiting in queue.")
-            else:
-                st.warning("No records containing active values (>0) were found under the 'MOVE TO QC' flag status.")
+            with tab2:
+                st.subheader("Active Mechanical / Remaining Batches")
+                if not mech_df.empty:
+                    display_mech = mech_df[[grn_col, mat_id_col, mat_col, val_col]].copy()
+                    display_mech.columns = ['GRN NO', 'Material ID', 'Material Group', 'Value in QualInsp.']
+                    st.dataframe(display_mech.sort_values(by='Value in QualInsp.', ascending=False), use_container_width=True)
+                else:
+                    st.info("No remaining mechanical records waiting in queue.")
         else:
-            st.error("Header Recognition Error! Could not map your text column names.")
-            st.write("Found Columns:", list(df.columns))
-            st.write(f"Matched details -> Plant: {plant_col}, Mat Group: {mat_col}, GRN: {grn_col}, Value: {val_col}, Status: {status_col}")
+            st.warning("No records containing active values (>0) were found under the 'MOVE TO QC' status filter.")
             
     except Exception as e:
-        st.error(f"Error executing sheet filter alignments: {e}")
+        st.error(f"Error executing validation dashboard layer: {e}")
 else:
     st.info("Awaiting SAP spreadsheet upload to calculate metrics.")
