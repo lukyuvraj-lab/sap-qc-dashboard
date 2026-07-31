@@ -4,43 +4,28 @@ import os
 
 st.set_page_config(page_title="SAP QC Plant Dashboard", layout="wide")
 
-st.title("🏭 SAP Quality Control Plant Dashboard")
-st.write("Filter pending inspection metrics dynamically by plant codes and material group rules.")
+st.title("🏭 SAP Quality Control Pending Dashboard")
+st.write("Processing rows explicitly marked for **MOVE TO QC** extraction.")
 
 # --- DYNAMIC DATABASE LOADER FRAMEWORK ---
 DB_FILE = "electrical_groups.txt"
 
-# Read your stored group values safely
 if os.path.exists(DB_FILE):
     with open(DB_FILE, "r") as f:
-        ELECTRICAL_GROUPS = [line.strip() for line in f.read().splitlines() if line.strip()]
+        raw_lines = f.read().splitlines()
+        ELECTRICAL_GROUPS = [line.strip().split('.')[0] for line in raw_lines if line.strip()]
 else:
-    # Small fallback list if the file is missing
     ELECTRICAL_GROUPS = ["10113", "10104", "10103", "10096", "10098", "10097"]
 
-# --- SIDEBAR DATABASE MANAGER TOOL ---
+ELECTRICAL_GROUPS = list(set(ELECTRICAL_GROUPS))
+
 st.sidebar.header("📁 Electrical Groups Manager")
-st.sidebar.write(f"Total groups stored: **{len(ELECTRICAL_GROUPS)}**")
+st.sidebar.write(f"Total groups loaded: **{len(ELECTRICAL_GROUPS)}**")
 
-# Interactive tool to temporarily append code layers right on screen
-new_code = st.sidebar.text_input("Quick-add temporary Material Group code:", value="")
-if new_code.strip():
-    clean_code = new_code.strip()
-    if clean_code not in ELECTRICAL_GROUPS:
-        ELECTRICAL_GROUPS.append(clean_code)
-        st.sidebar.success(f"Code {clean_code} added to current workspace session!")
-
-# Collapsible section to inspect all active electrical codes
-with st.sidebar.expander("👁️ View all stored Electrical Group codes"):
-    st.json(ELECTRICAL_GROUPS)
-
-
-# --- MAIN ENGINE WORKSPACE ---
-uploaded_file = st.file_uploader("Upload SAP QC Spreadsheet (.xlsx or .xls)", type=["xlsx", "xls"])
+uploaded_file = st.file_uploader("Upload SAP Spreadsheet (.xlsx or .xls)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
-        # Read the file cleanly
         df = pd.read_excel(uploaded_file)
         
         # --- FIXED PATHWAYS FOR PLACEMENT MATCHING ---
@@ -53,19 +38,35 @@ if uploaded_file is not None:
         curr_col = df.columns[13]
         val_col = df.columns[19]
         
-        # --- DATA CLEANING LAYER ---
+        # --- STRIP LABELS & CLEAN DATA ---
         df[plant_col] = df[plant_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-        df[mat_col] = df[mat_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
         df[grn_col] = df[grn_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
         df[curr_col] = df[curr_col].fillna("").astype(str).str.strip()
         
-        # Strip all thousands-separator blank space characters inside numbers safely
+        df[mat_col] = df[mat_col].fillna("").astype(str).str.strip()
+        df[mat_col] = df[mat_col].apply(lambda x: str(x).split('.')[0] if '.' in str(x) else str(x))
+        
         df[val_col] = df[val_col].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '')
         df[val_col] = pd.to_numeric(df[val_col], errors='coerce').fillna(0.0)
         
-        # Target active items currently pending inspection checks
-        pending_df = df[df[val_col] > 0].copy()
+        # --- STAGE FILTER: ONLY TAKE 'MOVE TO QC' ROWS ---
+        # Scans columns dynamically to find where 'MOVE TO QC' text is written
+        status_col = None
+        for col in df.columns:
+            if df[col].astype(str).str.upper().str.contains("MOVE TO QC").any():
+                status_col = col
+                break
         
+        if status_col is not None:
+            # Filter sheet to only look at 'MOVE TO QC' data rows
+            qc_mask = df[status_col].astype(str).str.upper().str.contains("MOVE TO QC")
+            pending_df = df[qc_mask & (df[val_col] > 0)].copy()
+            st.success(f"Successfully locked onto target status column: **'{status_col}'**")
+        else:
+            # Fallback filter to validation values if string is missing
+            pending_df = df[df[val_col] > 0].copy()
+            st.warning("Could not find a column explicitly containing 'MOVE TO QC' text. Defaulting to all active values.")
+
         # --- PLANT NAVIGATION CONTROL INTERFACE ---
         st.write("---")
         st.subheader("🌐 Plant Selection Workspace")
@@ -91,10 +92,10 @@ if uploaded_file is not None:
         elec_df = plant_filtered_df[plant_filtered_df[mat_col].isin(ELECTRICAL_GROUPS)]
         mech_df = plant_filtered_df[~plant_filtered_df[mat_col].isin(ELECTRICAL_GROUPS)]
         
-        # Metrics Calculations
+        # Calculations (Row counts equal total inspection lots)
         total_elec_value = elec_df[val_col].sum()
         total_elec_grns = elec_df[grn_col].nunique()
-        total_elec_lots = len(elec_df)  # Active items / rows count as total lots
+        total_elec_lots = len(elec_df)
         
         total_mech_value = mech_df[val_col].sum()
         total_mech_grns = mech_df[grn_col].nunique()
@@ -122,7 +123,6 @@ if uploaded_file is not None:
             
         st.write("---")
         
-        # Detailed Splits Tables Tab Panels
         tab1, tab2 = st.tabs(["⚡ Filtered Electrical Rows", "⚙️ Filtered Mechanical Rows"])
         
         with tab1:
@@ -132,7 +132,7 @@ if uploaded_file is not None:
                 display_elec.columns = ['GRN NO (Col I)', 'Material Group (Col D)', 'Currency (Col N)', 'Value in QualInsp. (Col T)']
                 st.dataframe(display_elec.sort_values(by='Value in QualInsp. (Col T)', ascending=False), use_container_width=True)
             else:
-                st.warning("No pending Electrical items found inside this plant data.")
+                st.warning("No pending Electrical rows found matching 'MOVE TO QC'.")
                 
         with tab2:
             st.subheader("Active Mechanical / Remaining Batches")
@@ -144,6 +144,6 @@ if uploaded_file is not None:
                 st.info("No remaining mechanical records waiting in queue.")
                 
     except Exception as e:
-        st.error(f"Error executing sheet index alignments: {e}")
+        st.error(f"Error executing sheet filter alignments: {e}")
 else:
     st.info("Awaiting SAP spreadsheet upload to calculate metrics.")
