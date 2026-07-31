@@ -5,7 +5,7 @@ import os
 st.set_page_config(page_title="SAP QC Plant Dashboard", layout="wide")
 
 st.title("🏭 SAP Quality Control Pending Dashboard")
-st.write("Locks directly onto text headers and filters rows matching status **MOVE TO QC**.")
+st.write("Locks directly onto text headers dynamically and filters rows matching status **MOVE TO QC**.")
 
 # --- DATABASE LOADER ---
 DB_FILE = "electrical_groups.txt"
@@ -28,16 +28,42 @@ uploaded_file = st.file_uploader("Upload SAP Spreadsheet (.xlsx or .xls)", type=
 
 if uploaded_file is not None:
     try:
-        df = pd.read_excel(uploaded_file)
+        # Load raw data without assuming where the header is
+        raw_df = pd.read_excel(uploaded_file, header=None)
         
-        # Clean header spaces and case variance to find columns by name
+        # --- DYNAMIC HEADER FINDER ENGINE ---
+        # Look for the row that actually contains your SAP headers
+        header_row_index = 0
+        found_header = False
+        
+        for idx, row in raw_df.iterrows():
+            row_str = row.astype(str).str.strip().str.lower().tolist()
+            # If this row contains keywords from your SAP report, it's our header row!
+            if any("material group" in s or "qualinsp" in s or "grn" in s for s in row_str):
+                header_row_index = idx
+                found_header = True
+                break
+                
+        # Re-read or adjust dataframe with the correct header row discovered
+        if found_header:
+            df = pd.read_excel(uploaded_file, skiprows=header_row_index)
+        else:
+            df = pd.read_excel(uploaded_file) # fallback if not found
+
+        # Clean header layout spaces and case variance to map keys smoothly
         headers_dict = {str(c).strip().lower(): c for c in df.columns}
         
-        plant_col = next((headers_dict[k] for k in headers_dict if "plant" == k), None)
-        mat_id_col = next((headers_dict[k] for k in headers_dict if "material" == k), None)
-        mat_col = next((headers_dict[k] for k in headers_dict if "material group" == k or "material grup" == k), None)
-        grn_col = next((headers_dict[k] for k in headers_dict if "grn no" == k or "grn number" == k), None)
-        val_col = next((headers_dict[k] for k in headers_dict if "value in qualinsp." == k or "value in qualinsp" == k), None)
+        # Smart Flexible Matching for names
+        plant_col = next((headers_dict[k] for k in headers_dict if "plant" in k), None)
+        
+        # Differentiate between 'Material' (ID) and 'Material Group'
+        mat_col = next((headers_dict[k] for k in headers_dict if "material group" in k or "material grup" in k), None)
+        mat_id_col = next((headers_dict[k] for k in headers_dict if "material" == k or ("material" in k and "group" not in k and "grup" not in k)), None)
+        if not mat_id_col:
+            mat_id_col = mat_col # Backup fallback if only one material column exists
+            
+        grn_col = next((headers_dict[k] for k in headers_dict if "grn no" in k or "grn" in k), None)
+        val_col = next((headers_dict[k] for k in headers_dict if "qualinsp" in k or "value in qual" in k or "insp" in k), None)
         
         status_col = None
         for col in df.columns:
@@ -45,7 +71,8 @@ if uploaded_file is not None:
                 status_col = col
                 break
 
-        if plant_col and mat_col and grn_col and val_col and status_col and mat_id_col:
+        # Check if mandatory metrics blocks are located
+        if plant_col and mat_col and grn_col and val_col and status_col:
             
             # --- DATA CLEANING LAYER ---
             df[plant_col] = df[plant_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
@@ -53,6 +80,7 @@ if uploaded_file is not None:
             df[mat_id_col] = df[mat_id_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
             df[mat_col] = df[mat_col].fillna("").astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
             
+            # Remove spaces and commas from numbers
             df[val_col] = df[val_col].astype(str).str.replace(r'[\s,]', '', regex=True)
             df[val_col] = pd.to_numeric(df[val_col], errors='coerce').fillna(0.0)
             
@@ -138,9 +166,9 @@ if uploaded_file is not None:
             else:
                 st.warning("No records containing active values (>0) were found under the 'MOVE TO QC' flag status.")
         else:
-            st.error("Header Recognition Error! Could not find one or more of your required text column names.")
-            st.write("Looking explicitly for exact column text matches for: **'Plant'**, **'Material'**, **'Material Group'**, **'GRN NO'**, and **'Value in QualInsp.'**")
-            st.write("Detected columns in your file layout:", list(df.columns))
+            st.error("Header Recognition Error! Could not map your text column names.")
+            st.write("Found Columns:", list(df.columns))
+            st.write(f"Matched details -> Plant: {plant_col}, Mat Group: {mat_col}, GRN: {grn_col}, Value: {val_col}, Status: {status_col}")
             
     except Exception as e:
         st.error(f"Error executing sheet filter alignments: {e}")
